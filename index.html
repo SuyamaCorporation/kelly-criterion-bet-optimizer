@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kelly Criterion Bet Size Optimizer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen p-6">
+<div class="max-w-4xl mx-auto">
+  <h1 class="text-2xl font-bold text-yellow-400 mb-2">Kelly Criterion Bet Size Optimizer</h1>
+  <p class="text-gray-400 mb-6 text-sm">Optimal bet sizing to maximize long-run geometric growth rate</p>
+
+  <!-- Inputs -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
+      <label class="block text-sm text-gray-400 mb-1">Win Probability <span class="text-yellow-400">p</span></label>
+      <input id="probInput" type="number" min="0.01" max="0.99" step="0.01" value="0.55"
+        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
+      <input id="probSlider" type="range" min="1" max="99" value="55"
+        class="w-full mt-2 accent-yellow-400">
+    </div>
+    <div class="bg-gray-900 rounded-xl p-4 border border-gray-800">
+      <label class="block text-sm text-gray-400 mb-1">Odds (payout multiple) <span class="text-yellow-400">b</span></label>
+      <input id="oddsInput" type="number" min="0.1" max="20" step="0.1" value="2.0"
+        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-yellow-500">
+      <input id="oddsSlider" type="range" min="1" max="200" value="20"
+        class="w-full mt-2 accent-yellow-400">
+    </div>
+  </div>
+
+  <!-- Kelly Result -->
+  <div id="kellyResult" class="bg-gray-900 rounded-xl p-5 border border-yellow-500 mb-6">
+    <div class="flex flex-wrap gap-6 items-center justify-center">
+      <div class="text-center">
+        <div class="text-xs text-gray-400 mb-1">Full Kelly f*</div>
+        <div id="kellyFull" class="text-4xl font-bold text-yellow-400">—</div>
+      </div>
+      <div class="text-center">
+        <div class="text-xs text-gray-400 mb-1">Expected Growth/Round</div>
+        <div id="expGrowth" class="text-2xl font-semibold text-green-400">—</div>
+      </div>
+      <div class="text-center">
+        <div class="text-xs text-gray-400 mb-1">Edge</div>
+        <div id="edgeVal" class="text-2xl font-semibold text-blue-400">—</div>
+      </div>
+      <div class="text-center">
+        <div class="text-xs text-gray-400 mb-1">Ruin Risk (100R)</div>
+        <div id="ruinRisk" class="text-2xl font-semibold text-red-400">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fractional Kelly Table -->
+  <div class="bg-gray-900 rounded-xl p-4 border border-gray-800 mb-6 overflow-x-auto">
+    <h2 class="text-base font-semibold text-gray-200 mb-3">Fractional Kelly Comparison</h2>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-gray-400 border-b border-gray-700">
+          <th class="text-left py-2 pr-4">Fraction</th>
+          <th class="text-right py-2 pr-4">Bet Size</th>
+          <th class="text-right py-2 pr-4">Exp Growth/Round</th>
+          <th class="text-right py-2 pr-4">Variance</th>
+          <th class="text-right py-2">Ruin Risk (100R)</th>
+        </tr>
+      </thead>
+      <tbody id="fracTable"></tbody>
+    </table>
+  </div>
+
+  <!-- Simulation Canvas -->
+  <div class="bg-gray-900 rounded-xl p-4 border border-gray-800 mb-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-base font-semibold text-gray-200">100-Round Wealth Simulation (Log Scale)</h2>
+      <button id="rerunBtn" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded-lg">Re-run Simulation</button>
+    </div>
+    <canvas id="simCanvas" class="w-full rounded-lg" height="300"></canvas>
+    <div class="flex flex-wrap gap-4 mt-3 justify-center text-xs" id="legend"></div>
+  </div>
+
+  <p class="text-xs text-gray-600 text-center">f* = (p·b − (1−p)) / b &nbsp;|&nbsp; Bet relative to current bankroll each round</p>
+</div>
+
+<script>
+const probInput = document.getElementById('probInput');
+const oddsInput = document.getElementById('oddsInput');
+const probSlider = document.getElementById('probSlider');
+const oddsSlider = document.getElementById('oddsSlider');
+
+// Sync inputs and sliders
+probInput.addEventListener('input', () => { probSlider.value = Math.round(parseFloat(probInput.value)*100); update(); });
+oddsInput.addEventListener('input', () => { oddsSlider.value = Math.round(parseFloat(oddsInput.value)*10); update(); });
+probSlider.addEventListener('input', () => { probInput.value = (parseInt(probSlider.value)/100).toFixed(2); update(); });
+oddsSlider.addEventListener('input', () => { oddsInput.value = (parseInt(oddsSlider.value)/10).toFixed(1); update(); });
+document.getElementById('rerunBtn').addEventListener('click', () => update());
+
+const FRACTIONS = [
+  { label: '1/4 Kelly', frac: 0.25, color: '#3b82f6' },
+  { label: '1/2 Kelly', frac: 0.5,  color: '#22c55e' },
+  { label: '3/4 Kelly', frac: 0.75, color: '#f59e0b' },
+  { label: 'Full Kelly', frac: 1.0,  color: '#ef4444' },
+  { label: '2x Kelly (overbetting)', frac: 2.0, color: '#a855f7' },
+];
+
+function kelly(p, b) {
+  return (p * b - (1 - p)) / b;
+}
+
+function expGrowthPerRound(p, b, f) {
+  // G = p*ln(1+f*b) + (1-p)*ln(1-f)
+  const fb = 1 + f * b;
+  const fq = 1 - f;
+  if (fb <= 0 || fq <= 0) return -Infinity;
+  return p * Math.log(fb) + (1 - p) * Math.log(fq);
+}
+
+function variance(p, b, f) {
+  const ElogW = expGrowthPerRound(p, b, f);
+  const ElogW2 = p * Math.pow(Math.log(1 + f*b), 2) + (1-p) * Math.pow(Math.log(1-f), 2);
+  return ElogW2 - ElogW * ElogW;
+}
+
+// Approximate ruin risk over N rounds as P(W_N < 0.01 * W_0)
+function ruinRiskApprox(p, b, f, rounds=100) {
+  if (f <= 0) return 0;
+  if (f >= 1) return 1; // certain ruin with Kelly >= 1 eventually
+  // Simulate multiple paths stochastically (seed-based for consistency)
+  let ruined = 0;
+  const PATHS = 500;
+  for (let i = 0; i < PATHS; i++) {
+    let w = 1;
+    for (let r = 0; r < rounds; r++) {
+      if (Math.random() < p) w *= (1 + f * b);
+      else w *= (1 - f);
+      if (w < 0.01) { ruined++; break; }
+    }
+  }
+  return ruined / PATHS;
+}
+
+// Deterministic simulation for chart (using seeded-like random via fixed sequence)
+let simSeeds = [];
+function resetSeeds(rounds=100, paths=5) {
+  simSeeds = [];
+  for (let i = 0; i < paths * rounds; i++) simSeeds.push(Math.random());
+}
+resetSeeds();
+
+function simulatePath(p, b, f, rounds, pathIdx) {
+  const offset = pathIdx * rounds;
+  let w = 1;
+  const path = [w];
+  for (let r = 0; r < rounds; r++) {
+    const rand = simSeeds[offset + r];
+    if (rand < p) w *= (1 + f * b);
+    else w *= (1 - f);
+    path.push(Math.max(w, 1e-10));
+  }
+  return path;
+}
+
+function update() {
+  const p = Math.max(0.01, Math.min(0.99, parseFloat(probInput.value) || 0.55));
+  const b = Math.max(0.1, parseFloat(oddsInput.value) || 2.0);
+
+  const f = kelly(p, b);
+  const edge = p * b - (1 - p);
+  const g = f > 0 ? expGrowthPerRound(p, b, f) : 0;
+
+  document.getElementById('kellyFull').textContent = f > 0 ? (f * 100).toFixed(1) + '%' : 'Neg Edge';
+  document.getElementById('expGrowth').textContent = g > 0 ? ('+' + (g * 100).toFixed(3) + '%') : (g * 100).toFixed(3) + '%';
+  document.getElementById('edgeVal').textContent = (edge * 100).toFixed(2) + '%';
+  document.getElementById('ruinRisk').textContent = f > 0 ? (ruinRiskApprox(p, b, Math.min(f, 0.999)) * 100).toFixed(1) + '%' : '0.0%';
+
+  // Fractional table
+  const tbody = document.getElementById('fracTable');
+  tbody.innerHTML = '';
+  FRACTIONS.forEach(({ label, frac, color }) => {
+    const betF = f > 0 ? f * frac : 0;
+    const betFClamped = Math.min(betF, 0.9999);
+    const g2 = betF > 0 && betFClamped < 1 ? expGrowthPerRound(p, b, betFClamped) : 0;
+    const v = betF > 0 && betFClamped < 1 ? variance(p, b, betFClamped) : 0;
+    const rr = betF > 0 ? ruinRiskApprox(p, b, betFClamped) * 100 : 0;
+    const grow100 = Math.exp(g2 * 100);
+    tbody.innerHTML += `<tr class="border-b border-gray-800 hover:bg-gray-800 transition-colors">
+      <td class="py-2 pr-4 font-medium" style="color:${color}">${label}</td>
+      <td class="text-right py-2 pr-4 text-gray-200">${(betF * 100).toFixed(2)}%</td>
+      <td class="text-right py-2 pr-4 ${g2 > 0 ? 'text-green-400' : 'text-red-400'}">${(g2 * 100).toFixed(4)}%</td>
+      <td class="text-right py-2 pr-4 text-gray-300">${v.toFixed(6)}</td>
+      <td class="text-right py-2 ${rr > 20 ? 'text-red-400' : rr > 5 ? 'text-yellow-400' : 'text-green-400'}">${rr.toFixed(1)}%</td>
+    </tr>`;
+  });
+
+  drawChart(p, b, f);
+}
+
+function drawChart(p, b, f) {
+  const canvas = document.getElementById('simCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.parentElement.clientWidth - 32;
+  canvas.width = W * dpr;
+  canvas.height = 300 * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = '300px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const pad = { top: 20, right: 20, bottom: 40, left: 60 };
+  const cw = W - pad.left - pad.right;
+  const ch = 300 - pad.top - pad.bottom;
+  const ROUNDS = 100;
+
+  ctx.fillStyle = '#030712';
+  ctx.fillRect(0, 0, W, 300);
+
+  // Build all paths
+  const allPaths = FRACTIONS.map(({ frac }) => {
+    const betF = f > 0 ? Math.min(f * frac, 0.9999) : 0;
+    return simulatePath(p, b, betF, ROUNDS, FRACTIONS.indexOf(FRACTIONS.find(x => x.frac === frac)));
+  });
+
+  // Find log scale range
+  let minLog = 0, maxLog = 0;
+  allPaths.forEach(path => {
+    path.forEach(v => {
+      const lv = Math.log10(Math.max(v, 1e-6));
+      minLog = Math.min(minLog, lv);
+      maxLog = Math.max(maxLog, lv);
+    });
+  });
+  if (maxLog - minLog < 0.5) { maxLog = minLog + 1; }
+  const logRange = maxLog - minLog;
+
+  const xScale = (i) => pad.left + (i / ROUNDS) * cw;
+  const yScale = (v) => {
+    const lv = Math.log10(Math.max(v, 1e-6));
+    return pad.top + ch - ((lv - minLog) / logRange) * ch;
+  };
+
+  // Grid lines
+  ctx.strokeStyle = '#1f2937';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 5; i++) {
+    const y = pad.top + (i / 5) * ch;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
+    const logV = maxLog - (i / 5) * logRange;
+    const label = Math.pow(10, logV).toFixed(logV >= 0 ? 1 : 3);
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(label + 'x', pad.left - 4, y + 4);
+  }
+  for (let i = 0; i <= 10; i++) {
+    const x = pad.left + (i / 10) * cw;
+    ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + ch); ctx.stroke();
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText((i * 10).toString(), x, pad.top + ch + 15);
+  }
+
+  // Break-even line
+  ctx.strokeStyle = '#374151';
+  ctx.setLineDash([4, 4]);
+  const y1 = yScale(1);
+  ctx.beginPath(); ctx.moveTo(pad.left, y1); ctx.lineTo(pad.left + cw, y1); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#4b5563';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('1x (break-even)', pad.left + 2, y1 - 3);
+
+  // Draw paths
+  FRACTIONS.forEach(({ color }, idx) => {
+    const path = allPaths[idx];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = idx === 3 ? 2.5 : 1.5;
+    ctx.globalAlpha = idx === 3 ? 1 : 0.8;
+    ctx.beginPath();
+    path.forEach((v, i) => {
+      const x = xScale(i), y = yScale(v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  });
+
+  // Axes labels
+  ctx.fillStyle = '#9ca3af';
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('Round', pad.left + cw / 2, 295);
+
+  // Legend
+  const legendEl = document.getElementById('legend');
+  legendEl.innerHTML = FRACTIONS.map(({ label, color }) =>
+    `<div class="flex items-center gap-1"><span style="background:${color}" class="inline-block w-4 h-0.5 rounded"></span><span style="color:${color}">${label}</span></div>`
+  ).join('');
+}
+
+// Init
+update();
+window.addEventListener('resize', update);
+</script>
+</body>
+</html>
